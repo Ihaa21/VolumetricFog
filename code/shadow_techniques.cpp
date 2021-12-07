@@ -1,0 +1,4 @@
+
+//
+// NOTE: Standard Shadow Data
+//
