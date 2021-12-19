@@ -17,6 +17,13 @@
 #include "shadow_techniques.h"
 #include "render_scene.h"
 
+struct gpu_vol_fog_buffer
+{
+    f32 GScattering;
+    f32 Density;
+    f32 Albedo;
+};
+
 struct demo_state
 {
     platform_block_arena PlatformBlockArena;
@@ -27,6 +34,8 @@ struct demo_state
     vk_linear_arena RenderTargetArena;
     VkImage ColorImage;
     render_target_entry ColorEntry;
+    VkImage FogAppliedImage;
+    render_target_entry FogAppliedEntry;
     VkImage DepthImage;
     render_target_entry DepthEntry;
     render_target ForwardRenderTarget;
@@ -42,6 +51,7 @@ struct demo_state
     VkDescriptorSet CopyToSwapDesc;
     vk_pipeline* CopyToSwapPipeline;
 
+    f32 LightIntensity;
     render_scene Scene;
 
     // NOTE: Saved model ids
@@ -67,6 +77,8 @@ struct demo_state
     // NOTE: Volumetric Fog Data
     VkDescriptorSetLayout VolFogDescLayout;
     VkDescriptorSet VolFogDescriptor;
+    gpu_vol_fog_buffer VolFogBufferCpu;
+    VkBuffer VolFogBuffer;
     vk_pipeline* VolFogPipeline;
 };
 

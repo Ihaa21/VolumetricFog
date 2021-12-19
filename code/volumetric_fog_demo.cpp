@@ -22,8 +22,11 @@ inline void RenderTargetSwapChainChange(u32 Width, u32 Height, VkFormat ColorFor
     // NOTE: Render Target Data
     {
         RenderTargetEntryReCreate(&DemoState->RenderTargetArena, Width, Height, ColorFormat,
+                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
+                                  VK_IMAGE_ASPECT_COLOR_BIT, &DemoState->ColorImage, &DemoState->ColorEntry);
+        RenderTargetEntryReCreate(&DemoState->RenderTargetArena, Width, Height, ColorFormat,
                                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
-                                  &DemoState->ColorImage, &DemoState->ColorEntry);
+                                  &DemoState->FogAppliedImage, &DemoState->FogAppliedEntry);
         RenderTargetEntryReCreate(&DemoState->RenderTargetArena, Width, Height, VK_FORMAT_D32_SFLOAT,
                                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
                                   VK_IMAGE_ASPECT_DEPTH_BIT, &DemoState->DepthImage, &DemoState->DepthEntry);
@@ -31,10 +34,11 @@ inline void RenderTargetSwapChainChange(u32 Width, u32 Height, VkFormat ColorFor
         if (ReCreate)
         {
             RenderTargetUpdateEntries(&DemoState->TempArena, &DemoState->ForwardRenderTarget);
+            RenderTargetUpdateEntries(&DemoState->TempArena, &DemoState->CopyToSwapTarget);
         }
 
         VkDescriptorImageWrite(&RenderState->DescriptorManager, *OutputRtSet, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                               DemoState->ColorEntry.View, DemoState->LinearSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                               DemoState->FogAppliedEntry.View, DemoState->LinearSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
         
     VkDescriptorManagerFlush(RenderState->Device, &RenderState->DescriptorManager);
@@ -102,6 +106,8 @@ DEMO_INIT(Init)
         DemoState->CopyToSwapDesc = VkDescriptorSetAllocate(RenderState->Device, RenderState->DescriptorPool, RenderState->CopyImageDescLayout);
     }
 
+    DemoState->LightIntensity = 1.0f;
+    
     DemoState->ShadowResX = 2048;
     DemoState->ShadowResY = 2048;
     DemoState->ShadowWorldDim = 10.0f;
@@ -120,19 +126,23 @@ DEMO_INIT(Init)
         u32 RenderHeight = RenderState->WindowHeight;
         
         DemoState->RenderTargetArena = VkLinearArenaCreate(RenderState->Device, RenderState->LocalMemoryId, GigaBytes(1));
-        RenderTargetSwapChainChange(RenderWidth, RenderHeight, RenderState->SwapChainFormat, &DemoState->Scene, &DemoState->CopyToSwapDesc);
+        RenderTargetSwapChainChange(RenderWidth, RenderHeight, VK_FORMAT_R16G16B16A16_SFLOAT, &DemoState->Scene, &DemoState->CopyToSwapDesc);
     
         // NOTE: Forward RT
         {
             render_target_builder Builder = RenderTargetBuilderBegin(&DemoState->Arena, &DemoState->TempArena, RenderWidth, RenderHeight);
             RenderTargetAddTarget(&Builder, &DemoState->ColorEntry, VkClearColorCreate(0, 0, 0, 1));
+            RenderTargetAddTarget(&Builder, &DemoState->FogAppliedEntry, VkClearColorCreate(0, 0, 0, 1));
             RenderTargetAddTarget(&Builder, &DemoState->DepthEntry, VkClearDepthStencilCreate(0, 0));
                             
             vk_render_pass_builder RpBuilder = VkRenderPassBuilderBegin(&DemoState->TempArena);
 
             u32 ColorId = VkRenderPassAttachmentAdd(&RpBuilder, DemoState->ColorEntry.Format, VK_ATTACHMENT_LOAD_OP_CLEAR,
-                                                    VK_ATTACHMENT_STORE_OP_STORE, VK_IMAGE_LAYOUT_UNDEFINED,
+                                                    VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            u32 FogAppliedColorId = VkRenderPassAttachmentAdd(&RpBuilder, DemoState->FogAppliedEntry.Format, VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                                              VK_ATTACHMENT_STORE_OP_STORE, VK_IMAGE_LAYOUT_UNDEFINED,
+                                                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             u32 DepthId = VkRenderPassAttachmentAdd(&RpBuilder, DemoState->DepthEntry.Format, VK_ATTACHMENT_LOAD_OP_CLEAR,
                                                     VK_ATTACHMENT_STORE_OP_STORE, VK_IMAGE_LAYOUT_UNDEFINED,
                                                     VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
@@ -146,10 +156,13 @@ DEMO_INIT(Init)
             VkRenderPassDependency(&RpBuilder, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                                    VK_ACCESS_SHADER_READ_BIT, VK_DEPENDENCY_BY_REGION_BIT);
+            VkRenderPassDependency(&RpBuilder, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_DEPENDENCY_BY_REGION_BIT);
             
             VkRenderPassSubPassBegin(&RpBuilder, VK_PIPELINE_BIND_POINT_GRAPHICS);
+            VkRenderPassInputRefAdd(&RpBuilder, ColorId, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             VkRenderPassInputRefAdd(&RpBuilder, DepthId, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
-            VkRenderPassColorRefAdd(&RpBuilder, ColorId, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            VkRenderPassColorRefAdd(&RpBuilder, FogAppliedColorId, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
             VkRenderPassSubPassEnd(&RpBuilder);
 
             DemoState->ForwardRenderTarget = RenderTargetBuilderEnd(&Builder, VkRenderPassBuilderEnd(&RpBuilder, RenderState->Device));
@@ -196,7 +209,9 @@ DEMO_INIT(Init)
                 vk_descriptor_layout_builder Builder = VkDescriptorLayoutBegin(&DemoState->VolFogDescLayout);
                 VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
                 VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
-                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT);
+                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
+                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
                 VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT);
                 VkDescriptorLayoutEnd(RenderState->Device, &Builder);
             }
@@ -218,12 +233,19 @@ DEMO_INIT(Init)
                                                                  DemoState->ForwardRenderTarget.RenderPass, 1, Layouts, ArrayCount(Layouts));
             }
 
+            DemoState->VolFogBuffer = VkBufferCreate(RenderState->Device, &RenderState->GpuArena,
+                                                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                     sizeof(gpu_vol_fog_buffer));
+            
             DemoState->VolFogDescriptor = VkDescriptorSetAllocate(RenderState->Device, RenderState->DescriptorPool, DemoState->VolFogDescLayout);
             VkDescriptorBufferWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, Scene->SceneBuffer);
             VkDescriptorBufferWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Scene->ShadowData.RenderGlobals);
-            VkDescriptorImageWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                   DemoState->DepthEntry.View, DemoState->PointSampler, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
-            VkDescriptorImageWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            VkDescriptorBufferWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, DemoState->VolFogBuffer);
+            VkDescriptorImageWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 3, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                                   DemoState->ColorEntry.View, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            VkDescriptorImageWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 4, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                                   DemoState->DepthEntry.View, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+            VkDescriptorImageWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                    Scene->ShadowData.ShadowEntry.View, Scene->ShadowData.Sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
         
@@ -245,7 +267,7 @@ DEMO_INIT(Init)
 
             u32 Dim = 1;
             u32 ImageSize = Dim*Dim*sizeof(u32);
-            Scene->WhiteTexture = VkImageCreate(RenderState->Device, &RenderState->GpuArena, Dim, Dim, VK_FORMAT_R8G8B8A8_UNORM,
+            Scene->WhiteTexture = VkImageCreate(RenderState->Device, &RenderState->GpuArena, Dim, Dim, VK_FORMAT_R8G8B8A8_SRGB,
                                                 VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
 
             u8* GpuMemory = VkCommandsPushWriteImage(Commands, Scene->WhiteTexture.Image, Dim, Dim, ImageSize, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -368,6 +390,30 @@ DEMO_MAIN_LOOP(MainLoop)
             
             DemoState->ShadowResX = u32(ResolutionX);
             DemoState->ShadowResY = u32(ResolutionY);
+
+            UiPanelNextRowIndent(&Panel);
+            UiPanelText(&Panel, "G Scattering:");
+            UiPanelHorizontalSlider(&Panel, 0.0f, 1.0f, &DemoState->VolFogBufferCpu.GScattering);
+            UiPanelNumberBox(&Panel, &DemoState->VolFogBufferCpu.GScattering);
+            UiPanelNextRow(&Panel);
+
+            UiPanelNextRowIndent(&Panel);
+            UiPanelText(&Panel, "Density:");
+            UiPanelHorizontalSlider(&Panel, 0.0f, 1.0f, &DemoState->VolFogBufferCpu.Density);
+            UiPanelNumberBox(&Panel, &DemoState->VolFogBufferCpu.Density);
+            UiPanelNextRow(&Panel);
+
+            UiPanelNextRowIndent(&Panel);
+            UiPanelText(&Panel, "Albedo:");
+            UiPanelHorizontalSlider(&Panel, 0.0f, 1.0f, &DemoState->VolFogBufferCpu.Albedo);
+            UiPanelNumberBox(&Panel, &DemoState->VolFogBufferCpu.Albedo);
+            UiPanelNextRow(&Panel);
+
+            UiPanelNextRowIndent(&Panel);
+            UiPanelText(&Panel, "Light Intensity:");
+            UiPanelHorizontalSlider(&Panel, 0.0f, 10.0f, &DemoState->LightIntensity);
+            UiPanelNumberBox(&Panel, &DemoState->LightIntensity);
+            UiPanelNextRow(&Panel);
             
             UiPanelNextRowIndent(&Panel);
             UiPanelText(&Panel, "World Dim:");
@@ -447,7 +493,7 @@ DEMO_MAIN_LOOP(MainLoop)
 
             v3 MinPoint = -V3(Radius, Radius, 0.5f * DemoState->ShadowWorldZDim);
             v3 MaxPoint = V3(Radius, Radius, 0.5f * DemoState->ShadowWorldZDim);
-            SceneDirectionalLightSet(Scene, LightDir, V3(1.0f, 1.0f, 1.0f), V3(0.15f), Scene->Camera.Pos, MinPoint, MaxPoint);
+            SceneDirectionalLightSet(Scene, LightDir, DemoState->LightIntensity, V3(1.0f, 1.0f, 1.0f), V3(0.05f), Scene->Camera.Pos, MinPoint, MaxPoint);
             
             // NOTE: Add Instances
             {
@@ -467,6 +513,15 @@ DEMO_MAIN_LOOP(MainLoop)
         }        
 
         RenderSceneUpload(Commands, &DemoState->Scene);
+
+        // NOTE: Upload vol fog constants
+        {
+            gpu_vol_fog_buffer* GpuData = VkCommandsPushWriteStruct(Commands, DemoState->VolFogBuffer, gpu_vol_fog_buffer,
+                                                                    BarrierMask(VkAccessFlagBits(0), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT),
+                                                                    BarrierMask(VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT));
+
+            *GpuData = DemoState->VolFogBufferCpu;
+        }
         
         VkCommandsTransferFlush(Commands, RenderState->Device);
     }

@@ -102,7 +102,7 @@ inline u32 SceneModelAdd(vk_commands* Commands, render_scene* Scene, linear_aren
         u32 SceneMaterialId = SceneMaterialAdd(Scene, *CurrMaterial);
         VkDescriptorBufferWrite(&RenderState->DescriptorManager, *CurrDescriptor, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Scene->MaterialBuffer,
                                 sizeof(gpu_blinn_phong_material) * SceneMaterialId);
-
+        
         if (CurrMaterial->DiffuseTextureId != 0xFFFFFFFF)
         {
             vk_image DiffuseImage = Model.TextureArray[CurrMaterial->DiffuseTextureId];
@@ -148,11 +148,13 @@ inline void ScenePointLightAdd(render_scene* Scene, v3 Pos, v3 Color, f32 Radius
     PointLight->Radius = Radius;
 }
 
-inline void SceneDirectionalLightSet(render_scene* Scene, v3 LightDir, v3 Color, v3 AmbientColor, v3 Pos, v3 BoundsMin, v3 BoundsMax)
+inline void SceneDirectionalLightSet(render_scene* Scene, v3 LightDir, f32 Intensity, v3 Color, v3 AmbientColor, v3 Pos, v3 BoundsMin,
+                                     v3 BoundsMax)
 {
+    // TODO: Use infinite z?
     // NOTE: Lighting is done in camera space
     Scene->ShadowData.GpuData.Dir = LightDir;
-    Scene->ShadowData.GpuData.Color = Color;
+    Scene->ShadowData.GpuData.Color = Intensity * Color;
     Scene->ShadowData.GpuData.AmbientColor = AmbientColor;
 
     v3 Up = V3(0, 0, 1);

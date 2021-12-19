@@ -91,7 +91,7 @@ void main()
     
     v3 SurfacePos = InWorldPos;
     v3 SurfaceNormal = Normalize(InWorldNormal);
-    v3 SurfaceColor = MaterialBuffer.DiffuseColor * DiffuseTexelColor.rgb;
+    v3 SurfaceColor = DiffuseTexelColor.rgb;
     v3 View = Normalize(CameraPos - SurfacePos);
     v3 Color = V3(0);
     
