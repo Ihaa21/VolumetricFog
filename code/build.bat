@@ -28,6 +28,11 @@ call glslangValidator -DFORWARD_FRAGMENT=1 -DSTANDARD=1 -S frag -e main -g -V -o
 
 call glslangValidator -DRAYMARCH_FOG_FRAG=1 -S frag -e main -g -V -o %DataDir%\shader_raymarch_fog_frag.spv %CodeDir%\shader_volumetric_fog.cpp
 
+call glslangValidator -DRAYMARCH_FOG_3D_FRAG=1 -S frag -e main -g -V -o %DataDir%\shader_raymarch_fog_3d_frag.spv %CodeDir%\shader_volumetric_fog.cpp
+call glslangValidator -DGENERATE_3D_FOG=1 -S comp -e main -g -V -o %DataDir%\shader_generate_3d_fog.spv %CodeDir%\shader_volumetric_3d.cpp
+
+call glslangValidator -DRAYMARCH_SMOKE=1 -S frag -e main -g -V -o %DataDir%\shader_raymarch_smoke_frag.spv %CodeDir%\shader_volumetric_smoke.cpp
+
 call glslangValidator -DGAUSSIAN_BLUR_X=1 -S frag -e main -g -V -o %DataDir%\shader_gaussian_x_frag.spv %CodeDir%\shader_gaussian_blur.cpp
 call glslangValidator -DGAUSSIAN_BLUR_Y=1 -S frag -e main -g -V -o %DataDir%\shader_gaussian_y_frag.spv %CodeDir%\shader_gaussian_blur.cpp
 

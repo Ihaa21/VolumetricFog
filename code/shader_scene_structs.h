@@ -25,4 +25,7 @@ struct scene_globals
     m4 InvVpTransform;
     v3 CameraPos;
     u32 NumPointLights;
+    v2 RenderDim;
+    f32 CurrFrameTime;
+    u32 CurrFrameId;
 };

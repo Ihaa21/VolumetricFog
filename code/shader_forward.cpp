@@ -67,6 +67,7 @@ layout(location = 2) in v2 InUv;
 layout(location = 3) in v3 InDirLightPos;
 
 layout(location = 0) out v4 OutColor;
+layout(location = 1) out v3 OutNormal;
 
 f32 DirLightOcclusionStandardGet(v3 SurfaceNormal, v3 LightDir, v3 LightPos)
 {
@@ -94,17 +95,26 @@ void main()
     v3 SurfaceColor = DiffuseTexelColor.rgb;
     v3 View = Normalize(CameraPos - SurfacePos);
     v3 Color = V3(0);
+    f32 SpecularExponent = 8.0f;
+
+    // NOTE: Calculate lighting for point lights
+    for (u32 PointLightId = 0; PointLightId < SceneBuffer.NumPointLights; ++PointLightId)
+    {
+        point_light CurrLight = PointLights[PointLightId];
+        Color += BlinnPhongPointLight(View, SurfacePos, SurfaceColor, SurfaceNormal, SpecularExponent, CurrLight);
+    }
     
     // NOTE: Calculate lighting for directional lights
     {
         f32 Occlusion = DirLightOcclusionStandardGet(SurfaceNormal, DirectionalLight.Dir, InDirLightPos);
         Occlusion = Occlusion == 0.0f ? 0.25f : Occlusion;
         
-        Color += Occlusion*BlinnPhongLighting(View, SurfaceColor, SurfaceNormal, 32, DirectionalLight.Dir, DirectionalLight.Color);
+        Color += Occlusion*BlinnPhongLighting(View, SurfaceColor, SurfaceNormal, SpecularExponent, -DirectionalLight.Dir, DirectionalLight.Color);
         Color += DirectionalLight.AmbientLight;
     }
 
     OutColor = V4(Color, 1);
+    OutNormal = SurfaceNormal;
 }
 
 #endif

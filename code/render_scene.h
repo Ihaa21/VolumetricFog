@@ -34,14 +34,18 @@ struct scene_globals
     m4 InvVpTransform;
     v3 CameraPos;
     u32 NumPointLights;
+    v2 RenderDim;
+    f32 CurrTime;
+    u32 CurrFrameId;
 };
 
 //
 // NOTE: Render Structs
 //
 
-struct shadow_data
+struct directional_light_data
 {
+    b32 Enabled;
     vk_linear_arena Arena;
     
     u32 Width;
@@ -50,6 +54,10 @@ struct shadow_data
     VkImage ShadowImage;
     render_target_entry ShadowEntry;
     render_target RenderTarget;
+
+    f32 DepthBiasConstant;
+    f32 DepthBiasSlope;
+    f32 DepthBiasClamp;
 
     gpu_directional_light GpuData;
     VkBuffer RenderGlobals;
@@ -103,6 +111,9 @@ struct render_handle
 
 struct render_scene
 {
+    u32 FrameId;
+    f32 TotalFrameTime;
+    
     vk_image WhiteTexture;
     
     // NOTE: General Render Data
@@ -115,7 +126,7 @@ struct render_scene
     // NOTE: Shadow
     VkDescriptorSetLayout ShadowDescLayout;
     vk_pipeline* ShadowPipeline;
-    shadow_data ShadowData;
+    directional_light_data DirectionalLightData;
     
     // NOTE: Scene Lights
     u32 MaxNumPointLights;

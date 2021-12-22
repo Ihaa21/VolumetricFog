@@ -1,29 +1,65 @@
 
 //
-// NOTE: Shadow Functions
+// NOTE: Directional Light Functions
 //
 
-inline void ShadowResize(render_scene* Scene, u32 Width, u32 Height)
+inline void DirectionalLightResize(render_scene* Scene, u32 Width, u32 Height, f32 DepthBiasConstant, f32 DepthBiasSlope, f32 DepthBiasClamp)
 {
-    shadow_data* ShadowData = &Scene->ShadowData;
+    directional_light_data* DirLight = &Scene->DirectionalLightData;
     
-    b32 ReCreate = ShadowData->Arena.Used != 0;
-    VkArenaClear(&ShadowData->Arena);
+    b32 ReCreate = DirLight->Arena.Used != 0;
+    VkArenaClear(&DirLight->Arena);
 
-    ShadowData->Width = Width;
-    ShadowData->Height = Height;
+    DirLight->Width = Width;
+    DirLight->Height = Height;
+    DirLight->DepthBiasConstant = DepthBiasConstant;
+    DirLight->DepthBiasSlope = DepthBiasSlope;
+    DirLight->DepthBiasClamp = DepthBiasClamp;
     
-    RenderTargetEntryReCreate(&ShadowData->Arena, Width, Height, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                              VK_IMAGE_ASPECT_DEPTH_BIT, &ShadowData->ShadowImage, &ShadowData->ShadowEntry);
+    RenderTargetEntryReCreate(&DirLight->Arena, Width, Height, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                              VK_IMAGE_ASPECT_DEPTH_BIT, &DirLight->ShadowImage, &DirLight->ShadowEntry);
 
     if (ReCreate)
     {
-        RenderTargetUpdateEntries(&DemoState->TempArena, &ShadowData->RenderTarget);
+        RenderTargetUpdateEntries(&DemoState->TempArena, &DirLight->RenderTarget);
     }
 
-    VkDescriptorImageWrite(&RenderState->DescriptorManager, ShadowData->Descriptor, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                           ShadowData->ShadowEntry.View, ShadowData->Sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    VkDescriptorImageWrite(&RenderState->DescriptorManager, DirLight->Descriptor, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                           DirLight->ShadowEntry.View, DirLight->Sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     VkDescriptorManagerFlush(RenderState->Device, &RenderState->DescriptorManager);
+}
+
+inline void SceneDirectionalShadowLightSet(render_scene* Scene, v3 LightDir, f32 Intensity, v3 Color, v3 AmbientColor, v3 Pos, v3 BoundsMin,
+                                           v3 BoundsMax)
+{
+    directional_light_data* DirLight = &Scene->DirectionalLightData;
+    
+    // TODO: Use infinite z?
+    // NOTE: Lighting is done in camera space
+    DirLight->Enabled = true;
+    DirLight->GpuData.Dir = LightDir;
+    DirLight->GpuData.Color = Intensity * Color;
+    DirLight->GpuData.AmbientColor = AmbientColor;
+
+    v3 Up = V3(0, 0, 1);
+    f32 DotValue = Abs(Dot(Up, LightDir));
+    if (DotValue > 0.99f && DotValue < 1.01f)
+    {
+        Up = V3(0, 1, 0);
+    }
+
+    DirLight->GpuData.VPTransform = (VkOrthoProjM4(BoundsMin.x, BoundsMax.x, BoundsMax.y, BoundsMin.y, BoundsMin.z, BoundsMax.z) *
+                                     LookAtM4(LightDir, Up, Pos));
+}
+
+inline void SceneDirectionalLightSet(render_scene* Scene, v3 LightDir, f32 Intensity, v3 Color, v3 AmbientColor)
+{
+    // NOTE: Lighting is done in camera space
+    directional_light_data* DirLight = &Scene->DirectionalLightData;
+    DirLight->Enabled = false;
+    DirLight->GpuData.Dir = LightDir;
+    DirLight->GpuData.Color = Intensity * Color;
+    DirLight->GpuData.AmbientColor = AmbientColor;
 }
 
 //
@@ -132,7 +168,7 @@ inline void SceneOpaqueInstanceAdd(render_scene* Scene, u32 HandleId, m4 WTransf
 
     instance_entry* Instance = Scene->OpaqueInstances + Scene->NumOpaqueInstances++;
     Instance->HandleId = HandleId;
-    Instance->ShadowWVP = Scene->ShadowData.GpuData.VPTransform * WTransform;
+    Instance->ShadowWVP = Scene->DirectionalLightData.GpuData.VPTransform * WTransform;
     Instance->WTransform = WTransform;
     Instance->WVPTransform = CameraGetVP(&Scene->Camera)*Instance->WTransform;
 }
@@ -148,27 +184,7 @@ inline void ScenePointLightAdd(render_scene* Scene, v3 Pos, v3 Color, f32 Radius
     PointLight->Radius = Radius;
 }
 
-inline void SceneDirectionalLightSet(render_scene* Scene, v3 LightDir, f32 Intensity, v3 Color, v3 AmbientColor, v3 Pos, v3 BoundsMin,
-                                     v3 BoundsMax)
-{
-    // TODO: Use infinite z?
-    // NOTE: Lighting is done in camera space
-    Scene->ShadowData.GpuData.Dir = LightDir;
-    Scene->ShadowData.GpuData.Color = Intensity * Color;
-    Scene->ShadowData.GpuData.AmbientColor = AmbientColor;
-
-    v3 Up = V3(0, 0, 1);
-    f32 DotValue = Abs(Dot(Up, LightDir));
-    if (DotValue > 0.99f && DotValue < 1.01f)
-    {
-        Up = V3(0, 1, 0);
-    }
-
-    Scene->ShadowData.GpuData.VPTransform = (VkOrthoProjM4(BoundsMin.x, BoundsMax.x, BoundsMax.y, BoundsMin.y, BoundsMin.z, BoundsMax.z) *
-                                             LookAtM4(LightDir, Up, Pos));
-}
-
-inline void RenderSceneCreate(linear_arena* Arena, linear_arena* TempArena, render_scene* Scene, u32 ShadowResX, u32 ShadowResY)
+inline void RenderSceneCreate(linear_arena* Arena, linear_arena* TempArena, render_scene* Scene)
 {
     *Scene = {};
     
@@ -200,12 +216,12 @@ inline void RenderSceneCreate(linear_arena* Arena, linear_arena* TempArena, rend
                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                                  sizeof(m4)*Scene->MaxNumPointLights);
 
-    Scene->ShadowData.RenderGlobals = VkBufferCreate(RenderState->Device, &RenderState->GpuArena,
-                                                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                                     sizeof(gpu_directional_light));
-    Scene->ShadowData.InstanceTransforms = VkBufferCreate(RenderState->Device, &RenderState->GpuArena,
-                                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                                          sizeof(m4)*Scene->MaxNumOpaqueInstances);
+    Scene->DirectionalLightData.RenderGlobals = VkBufferCreate(RenderState->Device, &RenderState->GpuArena,
+                                                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                               sizeof(gpu_directional_light));
+    Scene->DirectionalLightData.InstanceTransforms = VkBufferCreate(RenderState->Device, &RenderState->GpuArena,
+                                                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                                    sizeof(m4)*Scene->MaxNumOpaqueInstances);
         
     // NOTE: Create general descriptor set layouts
     {
@@ -235,13 +251,13 @@ inline void RenderSceneCreate(linear_arena* Arena, linear_arena* TempArena, rend
     VkDescriptorBufferWrite(&RenderState->DescriptorManager, Scene->SceneDescriptor, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Scene->OpaqueInstanceBuffer);
     VkDescriptorBufferWrite(&RenderState->DescriptorManager, Scene->SceneDescriptor, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Scene->PointLightBuffer);
     VkDescriptorBufferWrite(&RenderState->DescriptorManager, Scene->SceneDescriptor, 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Scene->PointLightTransforms);
-    VkDescriptorBufferWrite(&RenderState->DescriptorManager, Scene->SceneDescriptor, 4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Scene->ShadowData.RenderGlobals);
-    VkDescriptorBufferWrite(&RenderState->DescriptorManager, Scene->SceneDescriptor, 5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Scene->ShadowData.InstanceTransforms);
+    VkDescriptorBufferWrite(&RenderState->DescriptorManager, Scene->SceneDescriptor, 4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Scene->DirectionalLightData.RenderGlobals);
+    VkDescriptorBufferWrite(&RenderState->DescriptorManager, Scene->SceneDescriptor, 5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Scene->DirectionalLightData.InstanceTransforms);
 
     // NOTE: Add default material
     SceneMaterialAdd(Scene, V3(1), V3(0), 1);
 
-    // NOTE: Create directional shadow
+    // NOTE: Shadow Desc Layout
     {
         {
             vk_descriptor_layout_builder Builder = VkDescriptorLayoutBegin(&Scene->ShadowDescLayout);
@@ -249,23 +265,23 @@ inline void RenderSceneCreate(linear_arena* Arena, linear_arena* TempArena, rend
             VkDescriptorLayoutEnd(RenderState->Device, &Builder);
         }
         
-        shadow_data* Shadow = &Scene->ShadowData;
-        
+        directional_light_data* DirLight = &Scene->DirectionalLightData;
+            
         u64 HeapSize = GigaBytes(1);
-        Shadow->Arena = VkLinearArenaCreate(RenderState->Device, RenderState->LocalMemoryId, HeapSize);
+        DirLight->Arena = VkLinearArenaCreate(RenderState->Device, RenderState->LocalMemoryId, HeapSize);
 
-        Shadow->Sampler = VkSamplerCreate(RenderState->Device, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER, VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK, 0);
-        Shadow->Descriptor = VkDescriptorSetAllocate(RenderState->Device, RenderState->DescriptorPool, Scene->ShadowDescLayout);
-        ShadowResize(&DemoState->Scene, ShadowResX, ShadowResY);
+        DirLight->Sampler = VkSamplerCreate(RenderState->Device, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER, VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK, 0);
+        DirLight->Descriptor = VkDescriptorSetAllocate(RenderState->Device, RenderState->DescriptorPool, Scene->ShadowDescLayout);
+        DirectionalLightResize(Scene, 1, 1, 0, 0, 0);
 
         // NOTE: Shadow RT
         {
-            render_target_builder Builder = RenderTargetBuilderBegin(Arena, TempArena, ShadowResX, ShadowResY);
-            RenderTargetAddTarget(&Builder, &Shadow->ShadowEntry, VkClearDepthStencilCreate(0, 0));
+            render_target_builder Builder = RenderTargetBuilderBegin(Arena, TempArena, 1, 1);
+            RenderTargetAddTarget(&Builder, &DirLight->ShadowEntry, VkClearDepthStencilCreate(0, 0));
                             
             vk_render_pass_builder RpBuilder = VkRenderPassBuilderBegin(TempArena);
 
-            u32 DepthId = VkRenderPassAttachmentAdd(&RpBuilder, Shadow->ShadowEntry.Format, VK_ATTACHMENT_LOAD_OP_CLEAR,
+            u32 DepthId = VkRenderPassAttachmentAdd(&RpBuilder, DirLight->ShadowEntry.Format, VK_ATTACHMENT_LOAD_OP_CLEAR,
                                                     VK_ATTACHMENT_STORE_OP_STORE, VK_IMAGE_LAYOUT_UNDEFINED,
                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
@@ -276,7 +292,7 @@ inline void RenderSceneCreate(linear_arena* Arena, linear_arena* TempArena, rend
             VkRenderPassDependency(&RpBuilder, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_DEPENDENCY_BY_REGION_BIT);
                 
-            Shadow->RenderTarget = RenderTargetBuilderEnd(&Builder, VkRenderPassBuilderEnd(&RpBuilder, RenderState->Device));
+            DirLight->RenderTarget = RenderTargetBuilderEnd(&Builder, VkRenderPassBuilderEnd(&RpBuilder, RenderState->Device));
         }
     
         // NOTE: Shadow PSO
@@ -306,14 +322,15 @@ inline void RenderSceneCreate(linear_arena* Arena, linear_arena* TempArena, rend
                 };
             
             Scene->ShadowPipeline = VkPipelineBuilderEnd(&Builder, RenderState->Device, &RenderState->PipelineManager,
-                                                         Shadow->RenderTarget.RenderPass, 0, DescriptorLayouts, ArrayCount(DescriptorLayouts));
+                                                         DirLight->RenderTarget.RenderPass, 0, DescriptorLayouts, ArrayCount(DescriptorLayouts));
         }
     }
 }
 
-inline void RenderSceneUpload(vk_commands* Commands, render_scene* Scene)
+inline void RenderSceneUpload(vk_commands* Commands, render_scene* Scene, f32 FrameTime)
 {
     // NOTE: Upload instances
+    if (Scene->NumOpaqueInstances > 0)
     {                    
         gpu_instance_entry* GpuData = VkCommandsPushWriteArray(Commands, Scene->OpaqueInstanceBuffer, gpu_instance_entry, Scene->NumOpaqueInstances,
                                                                BarrierMask(VkAccessFlagBits(0), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT),
@@ -342,23 +359,25 @@ inline void RenderSceneUpload(vk_commands* Commands, render_scene* Scene)
             PointLights[LightId] = *CurrLight;
             // NOTE: Convert to view space
             v4 Test = CameraGetV(&Scene->Camera) * V4(CurrLight->Pos, 1.0f);
-            PointLights[LightId].Pos = (CameraGetV(&Scene->Camera) * V4(CurrLight->Pos, 1.0f)).xyz;
             Transforms[LightId] = CameraGetVP(&Scene->Camera) * M4Pos(CurrLight->Pos) * M4Scale(V3(CurrLight->Radius));
         }
     }
 
     // NOTE: Push Directional Lights
     {
+        directional_light_data* DirLight = &Scene->DirectionalLightData;
+        
         {
-            gpu_directional_light* GpuData = VkCommandsPushWriteStruct(Commands, Scene->ShadowData.RenderGlobals, gpu_directional_light,
+            gpu_directional_light* GpuData = VkCommandsPushWriteStruct(Commands, DirLight->RenderGlobals, gpu_directional_light,
                                                                        BarrierMask(VkAccessFlagBits(0), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT),
                                                                        BarrierMask(VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT));
-            CopyStruct(&Scene->ShadowData.GpuData, GpuData, gpu_directional_light);
+            CopyStruct(&Scene->DirectionalLightData.GpuData, GpuData, gpu_directional_light);
         }
             
         // NOTE: Copy shadow data
+        if (DirLight->Enabled && Scene->NumOpaqueInstances > 0)
         {
-            m4* GpuData = VkCommandsPushWriteArray(Commands, Scene->ShadowData.InstanceTransforms, m4, Scene->NumOpaqueInstances,
+            m4* GpuData = VkCommandsPushWriteArray(Commands, DirLight->InstanceTransforms, m4, Scene->NumOpaqueInstances,
                                                    BarrierMask(VkAccessFlagBits(0), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT),
                                                    BarrierMask(VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT));
             for (u32 InstanceId = 0; InstanceId < Scene->NumOpaqueInstances; ++InstanceId)
@@ -377,17 +396,11 @@ inline void RenderSceneUpload(vk_commands* Commands, render_scene* Scene)
         Data->InvVpTransform = Inverse(CameraGetVP(&Scene->Camera));
         Data->CameraPos = Scene->Camera.Pos;
         Data->NumPointLights = Scene->NumPointLights;
+        Data->RenderDim = V2(RenderState->WindowWidth, RenderState->WindowHeight);
+        Data->CurrTime = Scene->TotalFrameTime;
+        Data->CurrFrameId = Scene->FrameId++;
 
-        // TODO: REMOVE
-        v2 Uv = V2(0.50446f, 0.51921f);
-        v4 T0 = V4(2.0f * Uv.x - 1.0f, 2.0f * Uv.y - 1.0f, 0.0f, 1.0f);
-        v4 T1 = Data->InvVpTransform * T0;
-        T1 /= T1.w;
-        v4 T2 = CameraGetVP(&Scene->Camera) * T1;
-        T2 /= T2.w;
-
-        int i = 0;
-        
+        Scene->TotalFrameTime += FrameTime;
     }
 }
 

@@ -17,11 +17,60 @@
 #include "shadow_techniques.h"
 #include "render_scene.h"
 
+enum scene_id
+{
+    Scene_None,
+    Scene_Sponza,
+    Scene_Smoke,
+};
+
 struct gpu_vol_fog_buffer
 {
+    v3 Albedo;
     f32 GScattering;
+    v3 FogMinPos;
     f32 Density;
-    f32 Albedo;
+    v3 FogMaxPos;
+    u32 Pad;
+    v3 FogNumTexels;
+    f32 CurrFrameTime;
+};
+
+struct sponza_scene
+{
+    b32 Render3dFog;
+    
+    // NOTE: Directional Light Ui values
+    v3 DirLightView;
+    f32 LightIntensity;
+    f32 ShadowWorldDim;
+    f32 ShadowWorldZDim;
+
+    gpu_vol_fog_buffer VolFogBufferCpu;
+    VkBuffer VolFogBuffer;
+    vk_image Fog3dTexture;
+
+    VkDescriptorSetLayout VolFogDescLayout;
+    VkDescriptorSet VolFogDescriptor;
+
+    VkDescriptorSetLayout GenerateFogDescLayout;
+    VkDescriptorSet GenerateFogDescriptor;
+    
+    // NOTE: Constant Density Fog Data
+    vk_pipeline* VolFogPipeline;
+
+    // NOTE: 3d Texture Fog Data
+    vk_pipeline* GenerateFogPipeline;
+    vk_pipeline* VolFog3dPipeline;
+};
+
+struct smoke_scene
+{
+    VkDescriptorSetLayout VolSmokeDescLayout;
+    VkDescriptorSet VolSmokeDescriptor;
+    gpu_vol_fog_buffer VolFogBufferCpu;
+    VkBuffer VolFogBuffer;
+    vk_pipeline* VolSmokePipeline;
 };
 
 struct demo_state
@@ -34,6 +83,8 @@ struct demo_state
     vk_linear_arena RenderTargetArena;
     VkImage ColorImage;
     render_target_entry ColorEntry;
+    VkImage NormalImage;
+    render_target_entry NormalEntry;
     VkImage FogAppliedImage;
     render_target_entry FogAppliedEntry;
     VkImage DepthImage;
@@ -51,8 +102,10 @@ struct demo_state
     VkDescriptorSet CopyToSwapDesc;
     vk_pipeline* CopyToSwapPipeline;
 
-    f32 LightIntensity;
     render_scene Scene;
+    u32 SceneId;
+    sponza_scene SponzaScene;
+    smoke_scene SmokeScene;
 
     // NOTE: Saved model ids
     u32 Quad;
@@ -61,25 +114,8 @@ struct demo_state
     u32 Sponza;
 
     ui_state UiState;
-
-    // NOTE: Shadow values
-    u32 ShadowResX;
-    u32 ShadowResY;
-    f32 ShadowWorldDim;
-    f32 ShadowWorldZDim;
-    f32 DepthBiasConstant;
-    f32 DepthBiasSlope;
-    f32 DepthBiasClamp;
-    v3 ShadowView;
     
     vk_pipeline* ForwardPipeline;
-
-    // NOTE: Volumetric Fog Data
-    VkDescriptorSetLayout VolFogDescLayout;
-    VkDescriptorSet VolFogDescriptor;
-    gpu_vol_fog_buffer VolFogBufferCpu;
-    VkBuffer VolFogBuffer;
-    vk_pipeline* VolFogPipeline;
 };
 
 global demo_state* DemoState;

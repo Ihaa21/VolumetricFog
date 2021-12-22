@@ -4,6 +4,408 @@
 #include "render_scene.cpp"
 
 //
+// NOTE: Sponza Scene
+//
+
+inline sponza_scene SponzaSceneInit(render_scene* Scene)
+{
+    sponza_scene Result = {};
+    DemoState->SceneId = Scene_Sponza;
+    
+    Result.ShadowWorldDim = 10.0f;
+    Result.ShadowWorldZDim = 10.0f;
+    Result.LightIntensity = 2.5f;
+    Result.DirLightView = V3(0.3f, 0.0f, -1.0f);
+    Result.VolFogBufferCpu.Albedo = V3(0.62f, 0.56f, 0.39f);
+    Result.VolFogBufferCpu.Density = 1.0f;
+    Result.VolFogBufferCpu.GScattering = 0.4f;
+
+    Result.VolFogBufferCpu.FogMinPos = V3(0.0f, 1.5f, -0.4f) - V3(3.0f, 5.0f, 2.0f);
+    Result.VolFogBufferCpu.FogMaxPos = V3(0.0f, 1.5f, -0.4f) + V3(3.0f, 5.0f, 2.0f);
+    Result.VolFogBufferCpu.FogNumTexels = V3(256);
+
+    DirectionalLightResize(Scene, 4096, 4096, 0.0f, 3.0f, 0.0f);
+
+    DemoState->Scene.Camera = CameraFpsCreate(V3(0, -5, 2), V3(0, 1, 0), true, 1.0f, 1.0f);
+    CameraSetPersp(&DemoState->Scene.Camera, f32(RenderState->WindowWidth / RenderState->WindowHeight), 90.0f, 0.01f, 1000.0f);
+    
+    // NOTE: Create Volumetric Fog Data
+    {
+        // NOTE: Ray March Shader
+        {
+            {
+                vk_descriptor_layout_builder Builder = VkDescriptorLayoutBegin(&Result.VolFogDescLayout);
+                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT);
+                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
+                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
+                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
+                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT);
+                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT);
+                VkDescriptorLayoutEnd(RenderState->Device, &Builder);
+            }
+
+            VkDescriptorSetLayout Layouts[] =
+                {
+                    Result.VolFogDescLayout,
+                    Scene->SceneDescLayout,
+                };
+
+            // NOTE: Constant Density Shader
+            {
+                vk_pipeline_builder Builder = FullScreenPipelineBuilderCreate("shader_raymarch_fog_frag.spv", "main");
+
+                // NOTE: Set the blending state
+                VkPipelineColorAttachmentAdd(&Builder, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
+                                             VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO);
+                
+                Result.VolFogPipeline = VkPipelineBuilderEnd(&Builder, RenderState->Device, &RenderState->PipelineManager,
+                                                             DemoState->ForwardRenderTarget.RenderPass, 1, Layouts, ArrayCount(Layouts));
+            }
+
+            // NOTE: 3d Texture Shader
+            {
+                vk_pipeline_builder Builder = FullScreenPipelineBuilderCreate("shader_raymarch_fog_3d_frag.spv", "main");
+
+                // NOTE: Set the blending state
+                VkPipelineColorAttachmentAdd(&Builder, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
+                                             VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO);
+                
+                Result.VolFog3dPipeline = VkPipelineBuilderEnd(&Builder, RenderState->Device, &RenderState->PipelineManager,
+                                                               DemoState->ForwardRenderTarget.RenderPass, 1, Layouts, ArrayCount(Layouts));
+            }
+        }
+
+        // NOTE: Generate Fog Shader
+        {
+            {
+                vk_descriptor_layout_builder Builder = VkDescriptorLayoutBegin(&Result.GenerateFogDescLayout);
+                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT);
+                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT);
+                VkDescriptorLayoutEnd(RenderState->Device, &Builder);
+            }
+
+            VkDescriptorSetLayout Layouts[] =
+                {
+                    Result.GenerateFogDescLayout,
+                };
+
+            Result.GenerateFogPipeline = VkPipelineComputeCreate(RenderState->Device, &RenderState->PipelineManager, &DemoState->TempArena,
+                                                                 "shader_generate_3d_fog.spv", "main", Layouts, ArrayCount(Layouts));
+        }
+        
+        Result.VolFogBuffer = VkBufferCreate(RenderState->Device, &RenderState->GpuArena,
+                                             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                             sizeof(gpu_vol_fog_buffer));
+        Result.Fog3dTexture = VkImageCreate(RenderState->Device, &RenderState->GpuArena, u32(Result.VolFogBufferCpu.FogNumTexels.x),
+                                            u32(Result.VolFogBufferCpu.FogNumTexels.y), u32(Result.VolFogBufferCpu.FogNumTexels.z),
+                                            VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                            VK_IMAGE_ASPECT_COLOR_BIT);
+            
+        Result.GenerateFogDescriptor = VkDescriptorSetAllocate(RenderState->Device, RenderState->DescriptorPool, Result.GenerateFogDescLayout);
+        VkDescriptorBufferWrite(&RenderState->DescriptorManager, Result.GenerateFogDescriptor, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, Result.VolFogBuffer);
+        VkDescriptorImageWrite(&RenderState->DescriptorManager, Result.GenerateFogDescriptor, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                               Result.Fog3dTexture.View, DemoState->PointSampler, VK_IMAGE_LAYOUT_GENERAL);
+        
+        Result.VolFogDescriptor = VkDescriptorSetAllocate(RenderState->Device, RenderState->DescriptorPool, Result.VolFogDescLayout);
+        VkDescriptorBufferWrite(&RenderState->DescriptorManager, Result.VolFogDescriptor, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, Result.VolFogBuffer);
+        VkDescriptorImageWrite(&RenderState->DescriptorManager, Result.VolFogDescriptor, 1, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                               DemoState->ColorEntry.View, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        VkDescriptorImageWrite(&RenderState->DescriptorManager, Result.VolFogDescriptor, 2, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                               DemoState->NormalEntry.View, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        VkDescriptorImageWrite(&RenderState->DescriptorManager, Result.VolFogDescriptor, 3, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                               DemoState->DepthEntry.View, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+        VkDescriptorImageWrite(&RenderState->DescriptorManager, Result.VolFogDescriptor, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                               Scene->DirectionalLightData.ShadowEntry.View, Scene->DirectionalLightData.Sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        VkDescriptorImageWrite(&RenderState->DescriptorManager, Result.VolFogDescriptor, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                               Result.Fog3dTexture.View, DemoState->LinearSampler, VK_IMAGE_LAYOUT_GENERAL);
+    }
+
+    return Result;
+}
+
+inline void SponzaSceneUi(sponza_scene* SponzaScene, ui_panel* Panel)
+{
+    directional_light_data* DirLight = &DemoState->Scene.DirectionalLightData;
+    
+    local_global f32 ResolutionX = f32(DirLight->Width);
+    local_global f32 ResolutionY = f32(DirLight->Height);
+            
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "Render 3d Fog:");
+    UiPanelCheckBox(Panel, &SponzaScene->Render3dFog);
+    UiPanelNextRow(Panel);
+            
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "Resolution X:");
+    UiPanelHorizontalSlider(Panel, 1.0f, 4096.0f, &ResolutionX);
+    UiPanelNumberBox(Panel, &ResolutionX);
+    UiPanelNextRow(Panel);
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "Resolution Y:");
+    UiPanelHorizontalSlider(Panel, 1.0f, 4096.0f, &ResolutionY);
+    UiPanelNumberBox(Panel, &ResolutionY);
+    UiPanelNextRow(Panel);
+
+    if (DirLight->Width != u32(ResolutionX) || DirLight->Height != u32(ResolutionY))
+    {
+        DirectionalLightResize(&DemoState->Scene, u32(ResolutionX), u32(ResolutionY), DirLight->DepthBiasConstant,
+                               DirLight->DepthBiasSlope, DirLight->DepthBiasClamp);
+        VkDescriptorImageWrite(&RenderState->DescriptorManager, SponzaScene->VolFogDescriptor, 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                               DirLight->ShadowEntry.View, DirLight->Sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "G Scattering:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 1.0f, &SponzaScene->VolFogBufferCpu.GScattering);
+    UiPanelNumberBox(Panel, &SponzaScene->VolFogBufferCpu.GScattering);
+    UiPanelNextRow(Panel);
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "Density:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 1.0f, &SponzaScene->VolFogBufferCpu.Density);
+    UiPanelNumberBox(Panel, &SponzaScene->VolFogBufferCpu.Density);
+    UiPanelNextRow(Panel);
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "AlbedoR:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 1.0f, &SponzaScene->VolFogBufferCpu.Albedo.r);
+    UiPanelNumberBox(Panel, &SponzaScene->VolFogBufferCpu.Albedo.r);
+    UiPanelNextRow(Panel);
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "AlbedoG:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 1.0f, &SponzaScene->VolFogBufferCpu.Albedo.g);
+    UiPanelNumberBox(Panel, &SponzaScene->VolFogBufferCpu.Albedo.g);
+    UiPanelNextRow(Panel);
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "AlbedoB:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 1.0f, &SponzaScene->VolFogBufferCpu.Albedo.b);
+    UiPanelNumberBox(Panel, &SponzaScene->VolFogBufferCpu.Albedo.b);
+    UiPanelNextRow(Panel);
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "Light Intensity:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 10.0f, &SponzaScene->LightIntensity);
+    UiPanelNumberBox(Panel, &SponzaScene->LightIntensity);
+    UiPanelNextRow(Panel);
+            
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "World Dim:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 32.0f, &SponzaScene->ShadowWorldDim);
+    UiPanelNumberBox(Panel, &SponzaScene->ShadowWorldDim);
+    UiPanelNextRow(Panel);
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "World Z Dim:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 100.0f, &SponzaScene->ShadowWorldZDim);
+    UiPanelNumberBox(Panel, &SponzaScene->ShadowWorldZDim);
+    UiPanelNextRow(Panel);
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "Depth Bias Constant:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 3.0f, &DirLight->DepthBiasConstant);
+    UiPanelNumberBox(Panel, &DirLight->DepthBiasConstant);
+    UiPanelNextRow(Panel);
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "Depth Bias Slope:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 3.0f, &DirLight->DepthBiasSlope);
+    UiPanelNumberBox(Panel, &DirLight->DepthBiasSlope);
+    UiPanelNextRow(Panel);
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "Depth Bias Clamp:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 3.0f, &DirLight->DepthBiasClamp);
+    UiPanelNumberBox(Panel, &DirLight->DepthBiasClamp);
+    UiPanelNextRow(Panel);
+    
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "View X:");
+    UiPanelHorizontalSlider(Panel, -1.0f, 1.0f, &SponzaScene->DirLightView.x);
+    UiPanelNumberBox(Panel, &SponzaScene->DirLightView.x);
+    UiPanelNextRow(Panel);
+            
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "View Y:");
+    UiPanelHorizontalSlider(Panel, -1.0f, 1.0f, &SponzaScene->DirLightView.y);
+    UiPanelNumberBox(Panel, &SponzaScene->DirLightView.y);
+    UiPanelNextRow(Panel);
+            
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "View Z:");
+    UiPanelHorizontalSlider(Panel, -1.0f, 1.0f, &SponzaScene->DirLightView.z);
+    UiPanelNumberBox(Panel, &SponzaScene->DirLightView.z);
+    UiPanelNextRow(Panel);
+}
+
+inline void SponzaSceneUpdate(vk_commands* Commands, sponza_scene* SponzaScene, render_scene* Scene, f32 FrameTime)
+{
+    SponzaScene->VolFogBufferCpu.CurrFrameTime += FrameTime;
+    
+    v3 LightDir = Normalize(SponzaScene->DirLightView);
+    f32 Radius = 0.5f*SponzaScene->ShadowWorldDim;
+
+    v3 MinPoint = -V3(Radius, Radius, 0.5f * SponzaScene->ShadowWorldZDim);
+    v3 MaxPoint = V3(Radius, Radius, 0.5f * SponzaScene->ShadowWorldZDim);
+    SceneDirectionalShadowLightSet(Scene, LightDir, SponzaScene->LightIntensity, V3(1.0f, 1.0f, 1.0f), V3(0.05f), Scene->Camera.Pos,
+                                   MinPoint, MaxPoint);
+
+    {
+        local_global f32 CurrT = 0.0f;
+        if (CurrT > 2.0f * Pi32)
+        {
+            CurrT -= 2.0f * Pi32;
+        }
+        CurrT += FrameTime;
+        v3 LightCenter = V3(-1.0f, 0.0f, -2.0f);
+        ScenePointLightAdd(Scene, LightCenter + V3(Cos(CurrT), Sin(CurrT), 0.0f), V3(0.5f, 0.8f, 0.3f), 1.0f);
+    }
+    
+    SceneOpaqueInstanceAdd(Scene, DemoState->Sponza, M4Rotation(V3(Pi32 / 2.0f, Pi32 / 2.0f, 0.0f)) * M4Scale(V3(5)));
+
+    SponzaScene->VolFogBufferCpu.FogMinPos = V3(-1.25f, 0.3f, -0.4f) - V3(1.5f, 3.0f, 2.0f);
+    SponzaScene->VolFogBufferCpu.FogMaxPos = V3(-1.25f, 0.3f, -0.4f) + V3(1.5f, 3.0f, 2.0f);
+    
+    // NOTE: Upload vol fog constants
+    {
+        gpu_vol_fog_buffer* GpuData = VkCommandsPushWriteStruct(Commands, SponzaScene->VolFogBuffer, gpu_vol_fog_buffer,
+                                                                BarrierMask(VkAccessFlagBits(0), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT),
+                                                                BarrierMask(VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT));
+
+        *GpuData = SponzaScene->VolFogBufferCpu;
+    }
+}
+
+//
+// NOTE: Smoke Scene
+//
+
+inline smoke_scene SmokeSceneInit(render_scene* Scene)
+{
+    smoke_scene Result = {};
+    
+    DemoState->SceneId = Scene_Smoke;
+
+    Scene->Camera = CameraFpsCreate(V3(0, -5, 2), V3(0, 1, 0), true, 1.0f, 1.0f);
+    CameraSetPersp(&Scene->Camera, f32(RenderState->WindowWidth / RenderState->WindowHeight), 90.0f, 0.01f, 1000.0f);
+    
+    // NOTE: Create Volumetric Smoke Data
+    {
+        {
+            vk_descriptor_layout_builder Builder = VkDescriptorLayoutBegin(&Result.VolSmokeDescLayout);
+            VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
+            VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
+            VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+            VkDescriptorLayoutEnd(RenderState->Device, &Builder);
+        }
+
+        // NOTE: Vol Smoke Pipeline
+        {
+            VkDescriptorSetLayout Layouts[] =
+                {
+                    Scene->SceneDescLayout,
+                    Result.VolSmokeDescLayout,
+                };
+
+            vk_pipeline_builder Builder = FullScreenPipelineBuilderCreate("shader_raymarch_smoke_frag.spv", "main");
+
+            // NOTE: Set the blending state
+            VkPipelineColorAttachmentAdd(&Builder, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
+                                         VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO);
+                
+            Result.VolSmokePipeline = VkPipelineBuilderEnd(&Builder, RenderState->Device, &RenderState->PipelineManager,
+                                                         DemoState->ForwardRenderTarget.RenderPass, 1, Layouts, ArrayCount(Layouts));
+        }
+            
+        Result.VolFogBuffer = VkBufferCreate(RenderState->Device, &RenderState->GpuArena,
+                                             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                             sizeof(gpu_vol_fog_buffer));
+
+        Result.VolSmokeDescriptor = VkDescriptorSetAllocate(RenderState->Device, RenderState->DescriptorPool, Result.VolSmokeDescLayout);
+        VkDescriptorImageWrite(&RenderState->DescriptorManager, Result.VolSmokeDescriptor, 0, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                               DemoState->ColorEntry.View, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        VkDescriptorImageWrite(&RenderState->DescriptorManager, Result.VolSmokeDescriptor, 1, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                               DemoState->DepthEntry.View, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+        VkDescriptorBufferWrite(&RenderState->DescriptorManager, Result.VolSmokeDescriptor, 2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, Result.VolFogBuffer);
+    }
+
+    return Result;
+}
+
+inline void SmokeSceneUi(smoke_scene* SmokeScene, ui_panel* Panel)
+{
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "G Scattering:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 1.0f, &SmokeScene->VolFogBufferCpu.GScattering);
+    UiPanelNumberBox(Panel, &SmokeScene->VolFogBufferCpu.GScattering);
+    UiPanelNextRow(Panel);
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "Density:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 1.0f, &SmokeScene->VolFogBufferCpu.Density);
+    UiPanelNumberBox(Panel, &SmokeScene->VolFogBufferCpu.Density);
+    UiPanelNextRow(Panel);
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "AlbedoR:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 1.0f, &SmokeScene->VolFogBufferCpu.Albedo.r);
+    UiPanelNumberBox(Panel, &SmokeScene->VolFogBufferCpu.Albedo.r);
+    UiPanelNextRow(Panel);
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "AlbedoG:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 1.0f, &SmokeScene->VolFogBufferCpu.Albedo.g);
+    UiPanelNumberBox(Panel, &SmokeScene->VolFogBufferCpu.Albedo.g);
+    UiPanelNextRow(Panel);
+
+    UiPanelNextRowIndent(Panel);
+    UiPanelText(Panel, "AlbedoB:");
+    UiPanelHorizontalSlider(Panel, 0.0f, 1.0f, &SmokeScene->VolFogBufferCpu.Albedo.b);
+    UiPanelNumberBox(Panel, &SmokeScene->VolFogBufferCpu.Albedo.b);
+    UiPanelNextRow(Panel);
+}
+
+inline void SmokeSceneUpdate(vk_commands* Commands, smoke_scene* SmokeScene, render_scene* Scene, f32 FrameTime)
+{
+    SceneOpaqueInstanceAdd(Scene, DemoState->Quad, M4Scale(V3(100.0f, 100.0f, 1.0f)));
+
+    v3 LightDir = Normalize(V3(0, 0, -1));
+    SceneDirectionalLightSet(Scene, LightDir, 0.3f, V3(1.0f, 1.0f, 1.0f), V3(0.3f));
+
+    // NOTE: Spawn 3 point lights
+    v3 Colors[] =
+    {
+        V3(1, 0, 0),
+        V3(0, 1, 0),
+        V3(0, 0, 1),
+    };
+    
+    local_global f32 CurrT = 0.0f;
+    CurrT += FrameTime;
+    if (CurrT > 2.0f * Pi32)
+    {
+        CurrT -= 2.0f * Pi32;
+    }
+
+    for (u32 LightId = 0; LightId < 3; ++LightId)
+    {
+        f32 AngleStart = 2.0f * Pi32 * f32(LightId) / 3.0f;
+        ScenePointLightAdd(Scene, V3(Cos(AngleStart + CurrT), Sin(AngleStart + CurrT), 0.25f), 1.0f*Colors[LightId], 1.0f);
+    }
+    
+    // NOTE: Upload vol fog constants
+    {
+        gpu_vol_fog_buffer* GpuData = VkCommandsPushWriteStruct(Commands, SmokeScene->VolFogBuffer, gpu_vol_fog_buffer,
+                                                                BarrierMask(VkAccessFlagBits(0), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT),
+                                                                BarrierMask(VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT));
+
+        *GpuData = SmokeScene->VolFogBufferCpu;
+    }
+}
+
+//
 // NOTE: Demo Code
 //
 
@@ -24,6 +426,9 @@ inline void RenderTargetSwapChainChange(u32 Width, u32 Height, VkFormat ColorFor
         RenderTargetEntryReCreate(&DemoState->RenderTargetArena, Width, Height, ColorFormat,
                                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
                                   VK_IMAGE_ASPECT_COLOR_BIT, &DemoState->ColorImage, &DemoState->ColorEntry);
+        RenderTargetEntryReCreate(&DemoState->RenderTargetArena, Width, Height, VK_FORMAT_R16G16B16A16_SFLOAT,
+                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
+                                  VK_IMAGE_ASPECT_COLOR_BIT, &DemoState->NormalImage, &DemoState->NormalEntry);
         RenderTargetEntryReCreate(&DemoState->RenderTargetArena, Width, Height, ColorFormat,
                                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
                                   &DemoState->FogAppliedImage, &DemoState->FogAppliedEntry);
@@ -34,9 +439,30 @@ inline void RenderTargetSwapChainChange(u32 Width, u32 Height, VkFormat ColorFor
         if (ReCreate)
         {
             RenderTargetUpdateEntries(&DemoState->TempArena, &DemoState->ForwardRenderTarget);
-            RenderTargetUpdateEntries(&DemoState->TempArena, &DemoState->CopyToSwapTarget);
         }
 
+        // NOTE: Update sponza descriptors
+        sponza_scene* Sponza = &DemoState->SponzaScene;
+        if (Sponza->VolFogDescriptor != VK_NULL_HANDLE)
+        {
+            VkDescriptorImageWrite(&RenderState->DescriptorManager, Sponza->VolFogDescriptor, 1, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                                   DemoState->ColorEntry.View, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            VkDescriptorImageWrite(&RenderState->DescriptorManager, Sponza->VolFogDescriptor, 2, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                                   DemoState->NormalEntry.View, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            VkDescriptorImageWrite(&RenderState->DescriptorManager, Sponza->VolFogDescriptor, 3, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                                   DemoState->DepthEntry.View, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+        }
+
+        // NOTE: Update smoke descriptors
+        smoke_scene* Smoke = &DemoState->SmokeScene;
+        if (Smoke->VolSmokeDescriptor != VK_NULL_HANDLE)
+        {
+            VkDescriptorImageWrite(&RenderState->DescriptorManager, Smoke->VolSmokeDescriptor, 0, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                                   DemoState->ColorEntry.View, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            VkDescriptorImageWrite(&RenderState->DescriptorManager, Smoke->VolSmokeDescriptor, 1, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+                                   DemoState->DepthEntry.View, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+        }
+        
         VkDescriptorImageWrite(&RenderState->DescriptorManager, *OutputRtSet, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                DemoState->FogAppliedEntry.View, DemoState->LinearSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
@@ -105,21 +531,10 @@ DEMO_INIT(Init)
         DemoState->CopyToSwapPipeline = FullScreenCopyImageCreate(DemoState->CopyToSwapTarget.RenderPass, 0);
         DemoState->CopyToSwapDesc = VkDescriptorSetAllocate(RenderState->Device, RenderState->DescriptorPool, RenderState->CopyImageDescLayout);
     }
-
-    DemoState->LightIntensity = 1.0f;
-    
-    DemoState->ShadowResX = 2048;
-    DemoState->ShadowResY = 2048;
-    DemoState->ShadowWorldDim = 10.0f;
-    DemoState->ShadowWorldZDim = 10.0f;
-    DemoState->ShadowView = V3(0.3f, 0.0f, -1.0f);
-    DemoState->DepthBiasSlope = 3.0f;
     
     // NOTE: Init scene system
-    RenderSceneCreate(&DemoState->Arena, &DemoState->TempArena, &DemoState->Scene, DemoState->ShadowResX, DemoState->ShadowResY);
-    DemoState->Scene.Camera = CameraFpsCreate(V3(0, -5, 2), V3(0, 1, 0), true, 1.0f, 1.0f);
-    CameraSetPersp(&DemoState->Scene.Camera, f32(RenderState->WindowWidth / RenderState->WindowHeight), 90.0f, 0.01f, 1000.0f);
-
+    RenderSceneCreate(&DemoState->Arena, &DemoState->TempArena, &DemoState->Scene);
+    
     // NOTE: Create render data
     {
         u32 RenderWidth = RenderState->WindowWidth;
@@ -131,7 +546,8 @@ DEMO_INIT(Init)
         // NOTE: Forward RT
         {
             render_target_builder Builder = RenderTargetBuilderBegin(&DemoState->Arena, &DemoState->TempArena, RenderWidth, RenderHeight);
-            RenderTargetAddTarget(&Builder, &DemoState->ColorEntry, VkClearColorCreate(0, 0, 0, 1));
+            RenderTargetAddTarget(&Builder, &DemoState->ColorEntry, VkClearColorCreate(1, 1, 1, 1));
+            RenderTargetAddTarget(&Builder, &DemoState->NormalEntry, VkClearColorCreate(0, 0, 0, 0));
             RenderTargetAddTarget(&Builder, &DemoState->FogAppliedEntry, VkClearColorCreate(0, 0, 0, 1));
             RenderTargetAddTarget(&Builder, &DemoState->DepthEntry, VkClearDepthStencilCreate(0, 0));
                             
@@ -140,6 +556,9 @@ DEMO_INIT(Init)
             u32 ColorId = VkRenderPassAttachmentAdd(&RpBuilder, DemoState->ColorEntry.Format, VK_ATTACHMENT_LOAD_OP_CLEAR,
                                                     VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            u32 NormalId = VkRenderPassAttachmentAdd(&RpBuilder, DemoState->NormalEntry.Format, VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                                     VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
+                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             u32 FogAppliedColorId = VkRenderPassAttachmentAdd(&RpBuilder, DemoState->FogAppliedEntry.Format, VK_ATTACHMENT_LOAD_OP_CLEAR,
                                                               VK_ATTACHMENT_STORE_OP_STORE, VK_IMAGE_LAYOUT_UNDEFINED,
                                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -149,10 +568,11 @@ DEMO_INIT(Init)
 
             VkRenderPassSubPassBegin(&RpBuilder, VK_PIPELINE_BIND_POINT_GRAPHICS);
             VkRenderPassColorRefAdd(&RpBuilder, ColorId, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            VkRenderPassColorRefAdd(&RpBuilder, NormalId, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
             VkRenderPassDepthRefAdd(&RpBuilder, DepthId, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
             VkRenderPassSubPassEnd(&RpBuilder);
 
-            // NOTE: Sync depth writes so we can read depth
+            // NOTE: Sync depth writes so we can read color/normal/depth
             VkRenderPassDependency(&RpBuilder, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                                    VK_ACCESS_SHADER_READ_BIT, VK_DEPENDENCY_BY_REGION_BIT);
@@ -161,6 +581,7 @@ DEMO_INIT(Init)
             
             VkRenderPassSubPassBegin(&RpBuilder, VK_PIPELINE_BIND_POINT_GRAPHICS);
             VkRenderPassInputRefAdd(&RpBuilder, ColorId, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            VkRenderPassInputRefAdd(&RpBuilder, NormalId, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             VkRenderPassInputRefAdd(&RpBuilder, DepthId, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
             VkRenderPassColorRefAdd(&RpBuilder, FogAppliedColorId, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
             VkRenderPassSubPassEnd(&RpBuilder);
@@ -189,6 +610,8 @@ DEMO_INIT(Init)
             // NOTE: Set the blending state
             VkPipelineColorAttachmentAdd(&Builder, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO,
                                          VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO);
+            VkPipelineColorAttachmentAdd(&Builder, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO,
+                                         VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO);
 
             VkDescriptorSetLayout DescriptorLayouts[] =
                 {
@@ -200,58 +623,13 @@ DEMO_INIT(Init)
             DemoState->ForwardPipeline = VkPipelineBuilderEnd(&Builder, RenderState->Device, &RenderState->PipelineManager, DemoState->ForwardRenderTarget.RenderPass, 0,
                                                               DescriptorLayouts, ArrayCount(DescriptorLayouts));
         }
-
-        // NOTE: Create Volumetric Fog Data
-        {
-            render_scene* Scene = &DemoState->Scene;
-            
-            {
-                vk_descriptor_layout_builder Builder = VkDescriptorLayoutBegin(&DemoState->VolFogDescLayout);
-                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
-                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
-                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
-                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
-                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
-                VkDescriptorLayoutAdd(&Builder, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT);
-                VkDescriptorLayoutEnd(RenderState->Device, &Builder);
-            }
-
-            // NOTE: Vol Fog Pipeline
-            {
-                VkDescriptorSetLayout Layouts[] =
-                    {
-                        DemoState->VolFogDescLayout,
-                    };
-
-                vk_pipeline_builder Builder = FullScreenPipelineBuilderCreate("shader_raymarch_fog_frag.spv", "main");
-
-                // NOTE: Set the blending state
-                VkPipelineColorAttachmentAdd(&Builder, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
-                                             VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO);
-                
-                DemoState->VolFogPipeline = VkPipelineBuilderEnd(&Builder, RenderState->Device, &RenderState->PipelineManager,
-                                                                 DemoState->ForwardRenderTarget.RenderPass, 1, Layouts, ArrayCount(Layouts));
-            }
-
-            DemoState->VolFogBuffer = VkBufferCreate(RenderState->Device, &RenderState->GpuArena,
-                                                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                                     sizeof(gpu_vol_fog_buffer));
-            
-            DemoState->VolFogDescriptor = VkDescriptorSetAllocate(RenderState->Device, RenderState->DescriptorPool, DemoState->VolFogDescLayout);
-            VkDescriptorBufferWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, Scene->SceneBuffer);
-            VkDescriptorBufferWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Scene->ShadowData.RenderGlobals);
-            VkDescriptorBufferWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, DemoState->VolFogBuffer);
-            VkDescriptorImageWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 3, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
-                                   DemoState->ColorEntry.View, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            VkDescriptorImageWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 4, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
-                                   DemoState->DepthEntry.View, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
-            VkDescriptorImageWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                   Scene->ShadowData.ShadowEntry.View, Scene->ShadowData.Sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        }
-        
-        VkDescriptorManagerFlush(RenderState->Device, &RenderState->DescriptorManager);
     }
-    
+
+    DemoState->SponzaScene = SponzaSceneInit(&DemoState->Scene);
+    //DemoState->SmokeScene = SmokeSceneInit(&DemoState->Scene);
+        
+    VkDescriptorManagerFlush(RenderState->Device, &RenderState->DescriptorManager);
+
     // NOTE: Upload assets
     vk_commands* Commands = &RenderState->Commands;
     VkCommandsBegin(Commands, RenderState->Device);
@@ -316,7 +694,7 @@ DEMO_SWAPCHAIN_CHANGE(SwapChainChange)
 
     DemoState->Scene.Camera.PerspAspectRatio = f32(RenderState->WindowWidth / RenderState->WindowHeight);
     
-    RenderTargetSwapChainChange(RenderState->WindowWidth, RenderState->WindowHeight, RenderState->SwapChainFormat, &DemoState->Scene, &DemoState->CopyToSwapDesc);
+    RenderTargetSwapChainChange(RenderState->WindowWidth, RenderState->WindowHeight, VK_FORMAT_R16G16B16A16_SFLOAT, &DemoState->Scene, &DemoState->CopyToSwapDesc);
 }
 
 DEMO_CODE_RELOAD(CodeReload)
@@ -356,114 +734,24 @@ DEMO_MAIN_LOOP(MainLoop)
         UiCurrInput.MouseScroll = CurrInput->MouseScroll;
         CopyStruct(CurrInput->KeysDown, UiCurrInput.KeysDown, UiCurrInput.KeysDown);
         UiStateBegin(UiState, FrameTime, RenderState->WindowWidth, RenderState->WindowHeight, UiCurrInput);
+        
         local_global v2 PanelPos = V2(100, 800);
-        ui_panel Panel = UiPanelBegin(UiState, &PanelPos, "Shadow Panel");
-        
-        f32 FilterSize = 0;
-        f32 BlurFilterSize = 0;
-        
+        ui_panel Panel = UiPanelBegin(UiState, &PanelPos, "Fog Panel");
+        UiPanelText(&Panel, "Fog Data:");
+
+        switch (DemoState->SceneId)
         {
-            UiPanelText(&Panel, "Shadow Data:");
-
-            local_global f32 ResolutionX = f32(DemoState->ShadowResX);
-            local_global f32 ResolutionY = f32(DemoState->ShadowResY);
-            
-            UiPanelNextRowIndent(&Panel);
-            UiPanelText(&Panel, "Resolution X:");
-            UiPanelHorizontalSlider(&Panel, 1.0f, 4096.0f, &ResolutionX);
-            UiPanelNumberBox(&Panel, &ResolutionX);
-            UiPanelNextRow(&Panel);
-
-            UiPanelNextRowIndent(&Panel);
-            UiPanelText(&Panel, "Resolution Y:");
-            UiPanelHorizontalSlider(&Panel, 1.0f, 4096.0f, &ResolutionY);
-            UiPanelNumberBox(&Panel, &ResolutionY);
-            UiPanelNextRow(&Panel);
-
-            if (DemoState->ShadowResX != u32(ResolutionX) || DemoState->ShadowResY != u32(ResolutionY))
+            case Scene_Sponza:
             {
-                shadow_data* ShadowData = &DemoState->Scene.ShadowData;
-                ShadowResize(&DemoState->Scene, u32(ResolutionX), u32(ResolutionY));
-                VkDescriptorImageWrite(&RenderState->DescriptorManager, DemoState->VolFogDescriptor, 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                       ShadowData->ShadowEntry.View, ShadowData->Sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            }
-            
-            DemoState->ShadowResX = u32(ResolutionX);
-            DemoState->ShadowResY = u32(ResolutionY);
+                SponzaSceneUi(&DemoState->SponzaScene, &Panel);
+            } break;
 
-            UiPanelNextRowIndent(&Panel);
-            UiPanelText(&Panel, "G Scattering:");
-            UiPanelHorizontalSlider(&Panel, 0.0f, 1.0f, &DemoState->VolFogBufferCpu.GScattering);
-            UiPanelNumberBox(&Panel, &DemoState->VolFogBufferCpu.GScattering);
-            UiPanelNextRow(&Panel);
-
-            UiPanelNextRowIndent(&Panel);
-            UiPanelText(&Panel, "Density:");
-            UiPanelHorizontalSlider(&Panel, 0.0f, 1.0f, &DemoState->VolFogBufferCpu.Density);
-            UiPanelNumberBox(&Panel, &DemoState->VolFogBufferCpu.Density);
-            UiPanelNextRow(&Panel);
-
-            UiPanelNextRowIndent(&Panel);
-            UiPanelText(&Panel, "Albedo:");
-            UiPanelHorizontalSlider(&Panel, 0.0f, 1.0f, &DemoState->VolFogBufferCpu.Albedo);
-            UiPanelNumberBox(&Panel, &DemoState->VolFogBufferCpu.Albedo);
-            UiPanelNextRow(&Panel);
-
-            UiPanelNextRowIndent(&Panel);
-            UiPanelText(&Panel, "Light Intensity:");
-            UiPanelHorizontalSlider(&Panel, 0.0f, 10.0f, &DemoState->LightIntensity);
-            UiPanelNumberBox(&Panel, &DemoState->LightIntensity);
-            UiPanelNextRow(&Panel);
-            
-            UiPanelNextRowIndent(&Panel);
-            UiPanelText(&Panel, "World Dim:");
-            UiPanelHorizontalSlider(&Panel, 0.0f, 32.0f, &DemoState->ShadowWorldDim);
-            UiPanelNumberBox(&Panel, &DemoState->ShadowWorldDim);
-            UiPanelNextRow(&Panel);
-
-            UiPanelNextRowIndent(&Panel);
-            UiPanelText(&Panel, "World Z Dim:");
-            UiPanelHorizontalSlider(&Panel, 0.0f, 100.0f, &DemoState->ShadowWorldZDim);
-            UiPanelNumberBox(&Panel, &DemoState->ShadowWorldZDim);
-            UiPanelNextRow(&Panel);
-
-            UiPanelNextRowIndent(&Panel);
-            UiPanelText(&Panel, "Depth Bias Constant:");
-            UiPanelHorizontalSlider(&Panel, 0.0f, 3.0f, &DemoState->DepthBiasConstant);
-            UiPanelNumberBox(&Panel, &DemoState->DepthBiasConstant);
-            UiPanelNextRow(&Panel);
-
-            UiPanelNextRowIndent(&Panel);
-            UiPanelText(&Panel, "Depth Bias Slope:");
-            UiPanelHorizontalSlider(&Panel, 0.0f, 3.0f, &DemoState->DepthBiasSlope);
-            UiPanelNumberBox(&Panel, &DemoState->DepthBiasSlope);
-            UiPanelNextRow(&Panel);
-
-            UiPanelNextRowIndent(&Panel);
-            UiPanelText(&Panel, "Depth Bias Clamp:");
-            UiPanelHorizontalSlider(&Panel, 0.0f, 3.0f, &DemoState->DepthBiasClamp);
-            UiPanelNumberBox(&Panel, &DemoState->DepthBiasClamp);
-            UiPanelNextRow(&Panel);
-            
-            UiPanelNextRowIndent(&Panel);
-            UiPanelText(&Panel, "View X:");
-            UiPanelHorizontalSlider(&Panel, -1.0f, 1.0f, &DemoState->ShadowView.x);
-            UiPanelNumberBox(&Panel, &DemoState->ShadowView.x);
-            UiPanelNextRow(&Panel);
-            
-            UiPanelNextRowIndent(&Panel);
-            UiPanelText(&Panel, "View Y:");
-            UiPanelHorizontalSlider(&Panel, -1.0f, 1.0f, &DemoState->ShadowView.y);
-            UiPanelNumberBox(&Panel, &DemoState->ShadowView.y);
-            UiPanelNextRow(&Panel);
-            
-            UiPanelNextRowIndent(&Panel);
-            UiPanelText(&Panel, "View Z:");
-            UiPanelHorizontalSlider(&Panel, -1.0f, 1.0f, &DemoState->ShadowView.z);
-            UiPanelNumberBox(&Panel, &DemoState->ShadowView.z);
-            UiPanelNextRow(&Panel);
+            case Scene_Smoke:
+            {
+                SmokeSceneUi(&DemoState->SmokeScene, &Panel);
+            } break;
         }
-
+        
         UiPanelEnd(&Panel);
 
         UiStateEnd(UiState, &RenderState->DescriptorManager);
@@ -480,61 +768,53 @@ DEMO_MAIN_LOOP(MainLoop)
         }
         
         // NOTE: Populate scene
+        switch (DemoState->SceneId)
         {
-            local_global f32 T = 0.0f;
-            T += 0.001f;
-            if (T > 2.0f * Pi32)
+            case Scene_Sponza:
             {
-                T = 0.0f;
-            }
+                SponzaSceneUpdate(Commands, &DemoState->SponzaScene, Scene, FrameTime);
+            } break;
 
-            v3 LightDir = Normalize(DemoState->ShadowView);
-            f32 Radius = 0.5f*DemoState->ShadowWorldDim;
-
-            v3 MinPoint = -V3(Radius, Radius, 0.5f * DemoState->ShadowWorldZDim);
-            v3 MaxPoint = V3(Radius, Radius, 0.5f * DemoState->ShadowWorldZDim);
-            SceneDirectionalLightSet(Scene, LightDir, DemoState->LightIntensity, V3(1.0f, 1.0f, 1.0f), V3(0.05f), Scene->Camera.Pos, MinPoint, MaxPoint);
-            
-            // NOTE: Add Instances
+            case Scene_Smoke:
             {
-                // NOTE: Test scene
-#if 0
-                SceneOpaqueInstanceAdd(Scene, DemoState->Sphere, M4Pos(V3(0.0f, 0.0f, 2.0f)) * M4Scale(V3(1.0f)));
-                
-                SceneOpaqueInstanceAdd(Scene, DemoState->Cube, M4Pos(V3(0, 0, 0)) * M4Scale(V3(10, 10, 1)));
-                SceneOpaqueInstanceAdd(Scene, DemoState->Cube, M4Pos(V3(0, -2, 0)) * M4Scale(V3(10, 1, 10)));
-#endif
-
-                // NOTE: Sponza
-#if 1
-                SceneOpaqueInstanceAdd(Scene, DemoState->Sponza, M4Rotation(V3(Pi32 / 2.0f, Pi32 / 2.0f, 0.0f)) * M4Scale(V3(5)));
-#endif
-            }
-        }        
-
-        RenderSceneUpload(Commands, &DemoState->Scene);
-
-        // NOTE: Upload vol fog constants
-        {
-            gpu_vol_fog_buffer* GpuData = VkCommandsPushWriteStruct(Commands, DemoState->VolFogBuffer, gpu_vol_fog_buffer,
-                                                                    BarrierMask(VkAccessFlagBits(0), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT),
-                                                                    BarrierMask(VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT));
-
-            *GpuData = DemoState->VolFogBufferCpu;
+                SmokeSceneUpdate(Commands, &DemoState->SmokeScene, Scene, FrameTime);
+            } break;
         }
+
+        RenderSceneUpload(Commands, &DemoState->Scene, FrameTime);
         
         VkCommandsTransferFlush(Commands, RenderState->Device);
     }
 
+    // NOTE: Generate our fog
+    if (DemoState->SceneId == Scene_Sponza && DemoState->SponzaScene.Render3dFog)
+    {
+        sponza_scene* Sponza = &DemoState->SponzaScene;
+        
+        VkBarrierImageAdd(Commands, Sponza->Fog3dTexture.Image, VK_IMAGE_ASPECT_COLOR_BIT,
+                          0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                          VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_IMAGE_LAYOUT_GENERAL);
+        VkCommandsBarrierFlush(Commands);
+
+        u32 DispatchDim = CeilU32(Sponza->VolFogBufferCpu.FogNumTexels.x / 4.0f);
+        VkComputeDispatch(Commands, Sponza->GenerateFogPipeline, &Sponza->GenerateFogDescriptor, 1, DispatchDim, DispatchDim, DispatchDim);
+
+        VkBarrierImageAdd(Commands, Sponza->Fog3dTexture.Image, VK_IMAGE_ASPECT_COLOR_BIT,
+                          VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                          VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_IMAGE_LAYOUT_GENERAL);
+        VkCommandsBarrierFlush(Commands);
+    }
+    
     // NOTE: Render Scene and Shadows
     {
         render_scene* Scene = &DemoState->Scene;
-        shadow_data* ShadowData = &Scene->ShadowData;
+        directional_light_data* DirLight = &Scene->DirectionalLightData;
     
         // NOTE: Generate Directional Shadow Map
-        RenderTargetPassBegin(&ShadowData->RenderTarget, Commands, RenderTargetRenderPass_SetViewPort | RenderTargetRenderPass_SetScissor);
+        RenderTargetPassBegin(&DirLight->RenderTarget, Commands, RenderTargetRenderPass_SetViewPort | RenderTargetRenderPass_SetScissor);
+        if (DirLight->Enabled)
         {
-            vkCmdSetDepthBias(Commands->Buffer, DemoState->DepthBiasConstant, -DemoState->DepthBiasClamp, -DemoState->DepthBiasSlope);
+            vkCmdSetDepthBias(Commands->Buffer, DirLight->DepthBiasConstant, -DirLight->DepthBiasClamp, -DirLight->DepthBiasSlope);
             
             vkCmdBindPipeline(Commands->Buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, Scene->ShadowPipeline->Handle);
             {
@@ -558,7 +838,7 @@ DEMO_MAIN_LOOP(MainLoop)
                 VkDescriptorSet DescriptorSets[] =
                     {
                         Scene->SceneDescriptor,
-                        ShadowData->Descriptor,
+                        DirLight->Descriptor,
                     };
                 vkCmdBindDescriptorSets(Commands->Buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, DemoState->ForwardPipeline->Layout, 1,
                                         ArrayCount(DescriptorSets), DescriptorSets, 0, 0);
@@ -567,8 +847,42 @@ DEMO_MAIN_LOOP(MainLoop)
             RenderSceneRender(Commands, &DemoState->Scene, DemoState->ForwardPipeline, true);
         }
         RenderTargetNextSubPass(Commands);
+
         // NOTE: Draw Volumetric Fog
-        FullScreenPassRender(Commands, DemoState->VolFogPipeline, 1, &DemoState->VolFogDescriptor);
+        switch (DemoState->SceneId)
+        {
+            case Scene_Sponza:
+            {
+                sponza_scene* Sponza = &DemoState->SponzaScene;
+                
+                VkDescriptorSet Descriptors[] =
+                {
+                    Sponza->VolFogDescriptor,
+                    Scene->SceneDescriptor,
+                };
+
+                if (Sponza->Render3dFog)
+                {
+                    FullScreenPassRender(Commands, Sponza->VolFog3dPipeline, ArrayCount(Descriptors), Descriptors);
+                }
+                else
+                {
+                    FullScreenPassRender(Commands, Sponza->VolFogPipeline, ArrayCount(Descriptors), Descriptors);
+                }
+            } break;
+
+            case Scene_Smoke:
+            {
+                VkDescriptorSet Descriptors[] =
+                {
+                    Scene->SceneDescriptor,
+                    DemoState->SmokeScene.VolSmokeDescriptor,
+                };
+                
+                FullScreenPassRender(Commands, DemoState->SmokeScene.VolSmokePipeline, ArrayCount(Descriptors), Descriptors);
+            } break;
+        }
+        
         RenderTargetPassEnd(Commands);        
     }
 
