@@ -8,9 +8,16 @@
 
   NOTE: The goal for this demo is to try various volumetric fog techniques. 
 
+  TODO:
+
+   - add random ray offsets + blur (only need to figure out how to jitter)
+   - once I get better at SDFs, go back to the smoke sim
+
   References:
 
     - https://www.alexandre-pestana.com/volumetric-lights/
+    - https://wallisc.github.io/rendering/2020/05/02/Volumetric-Rendering-Part-1.html
+    - https://wallisc.github.io/rendering/2020/05/02/Volumetric-Rendering-Part-2.html
     
  */
 
